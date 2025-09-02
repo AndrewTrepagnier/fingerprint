@@ -1,0 +1,12 @@
+# Julia dependencies for radial fingerprint computation
+# Add these to your Julia environment using: julia -e 'using Pkg; Pkg.add(["LinearAlgebra", "PyCall", "Threads"])'
+
+# Core dependencies
+LinearAlgebra
+PyCall
+Threads
+
+# Optional performance dependencies
+BenchmarkTools
+StaticArrays  # For better performance with small arrays
+LoopVectorization  # For SIMD optimization
