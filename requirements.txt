@@ -1,3 +1,0 @@
-numpy>=1.19.0
-pandas>=1.0.0
-PyJulia>=0.5.0
