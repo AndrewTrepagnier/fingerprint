@@ -1,0 +1,188 @@
+name: Test Radial Fingerprint
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'src/radial.py'
+      - '.github/workflows/test-fingerprint.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'src/radial.py'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: pip install numpy
+    
+    - name: Create C++ reference test
+      run: |
+        cat << 'EOF' > test_cpp_radial.cpp
+        /**
+         * Standalone test of the RANN radial fingerprint computation.
+         * Reference implementation extracted from rann_fingerprint_radial.cpp (LAMMPS).
+         */
+        #include <cmath>
+        #include <iostream>
+        #include <iomanip>
+
+        const double re = 2.5, rc = 5.0, dr = 0.5;
+        const double alpha[] = {1.0, 1.5, 2.0};
+        const int nmax = 2, omin = 0, res = 1000, buf = 5;
+
+        double cutofffunction(double r, double rc, double dr) {
+            double x = (rc - r) / dr;
+            if (x > 1.0) return 1.0;
+            if (x >= 0.0) { double t = 1.0 - x; double t4 = t*t*t*t; return (1.0-t4)*(1.0-t4); }
+            return 0.0;
+        }
+
+        void compute_tables(double* radialtable, double* dfctable, double* r1_table) {
+            int num_terms = nmax - omin + 1;
+            for (int k = 0; k < (res + buf); k++) {
+                double r1 = rc * rc * (double)(k) / (double)(res);
+                double r = sqrt(r1);
+                r1_table[k] = r1;
+                for (int m = 0; m <= (nmax - omin); m++) {
+                    radialtable[k * num_terms + m] = pow(r / re, m + omin) * exp(-alpha[m] * r / re) * cutofffunction(r, rc, dr);
+                }
+                if (r >= rc || r <= (rc - dr)) { dfctable[k] = 0.0; }
+                else { double x = (rc - r) / dr; double t = 1.0 - x; dfctable[k] = -8.0 * t*t*t / dr / (1.0 - t*t*t*t); }
+            }
+        }
+
+        void compute_fingerprint_pair(double rij, double* radialtable, double* features) {
+            int num_terms = nmax - omin + 1;
+            double rsq = rij * rij;
+            if (rsq > rc * rc) return;
+            double r1 = rsq * (double)res / (rc * rc);
+            int m1 = (int)r1;
+            if (m1 > res || m1 < 1) return;
+            double* p0 = &radialtable[(m1 - 1) * num_terms];
+            double* p1 = &radialtable[m1 * num_terms];
+            double* p2 = &radialtable[(m1 + 1) * num_terms];
+            double* p3 = &radialtable[(m1 + 2) * num_terms];
+            r1 = r1 - trunc(r1);
+            for (int l = 0; l <= (nmax - omin); l++) {
+                features[l] += p1[l] + 0.5 * r1 * (p2[l] - p0[l] + r1 * (2.0*p0[l] - 5.0*p1[l] + 4.0*p2[l] - p3[l] + r1 * (3.0*(p1[l] - p2[l]) + p3[l] - p0[l])));
+            }
+        }
+
+        int main() {
+            std::cout << std::fixed << std::setprecision(10);
+            int num_terms = nmax - omin + 1;
+            double* radialtable = new double[(res + buf) * num_terms];
+            double* dfctable = new double[res + buf];
+            double* r1_table = new double[res + buf];
+            compute_tables(radialtable, dfctable, r1_table);
+            
+            // Output reference values
+            std::cout << "cutoff:" << cutofffunction(2.0, rc, dr) << "," << cutofffunction(4.75, rc, dr) << std::endl;
+            std::cout << "radial_k100:" << radialtable[100*num_terms+0] << "," << radialtable[100*num_terms+1] << "," << radialtable[100*num_terms+2] << std::endl;
+            std::cout << "radial_k500:" << radialtable[500*num_terms+0] << "," << radialtable[500*num_terms+1] << "," << radialtable[500*num_terms+2] << std::endl;
+            std::cout << "dfc_k900:" << dfctable[900] << std::endl;
+            std::cout << "dfc_k950:" << dfctable[950] << std::endl;
+            double f[3] = {0,0,0}; compute_fingerprint_pair(2.0, radialtable, f);
+            std::cout << "fingerprint_r2:" << f[0] << "," << f[1] << "," << f[2] << std::endl;
+            
+            delete[] radialtable; delete[] dfctable; delete[] r1_table;
+            return 0;
+        }
+        EOF
+    
+    - name: Compile C++ reference
+      run: g++ -o test_cpp_radial test_cpp_radial.cpp -std=c++11
+    
+    - name: Create Python comparison test
+      run: |
+        cat << 'EOF' > test_compare.py
+        """Compare C++ and Python radial fingerprint implementations."""
+        import subprocess
+        import numpy as np
+        import sys
+        sys.path.insert(0, 'src')
+        from radial import Fingerprint_radial, RadialParameters, AtomicSystem
+
+        def run_cpp():
+            result = subprocess.run(['./test_cpp_radial'], capture_output=True, text=True)
+            cpp_values = {}
+            for line in result.stdout.split('\n'):
+                if ':' in line:
+                    key, vals = line.split(':')
+                    cpp_values[key] = [float(v) for v in vals.split(',')]
+            return cpp_values
+
+        def run_python():
+            fp = Fingerprint_radial()
+            fp.params = RadialParameters(
+                re=2.5, rc=5.0, dr=0.5,
+                alpha=[1.0, 1.5, 2.0], alphak=[1.0, 1.5, 2.0],
+                n=2, o=0
+            )
+            r1, radii_table, dfctable = fp.radii_table()
+            py_values = {
+                'cutoff': [fp.cutoff_function(2.0), fp.cutoff_function(4.75)],
+                'radial_k100': [radii_table[100, 0], radii_table[100, 1], radii_table[100, 2]],
+                'radial_k500': [radii_table[500, 0], radii_table[500, 1], radii_table[500, 2]],
+                'dfc_k900': [dfctable[900]],
+                'dfc_k950': [dfctable[950]],
+            }
+            # Compute fingerprint
+            positions = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+            distance_matrix = np.zeros((2, 2))
+            distance_matrix[0, 1] = distance_matrix[1, 0] = 2.0
+            system = AtomicSystem(num_atoms=2, atom_positions=positions,
+                                  box_bounds=np.array([[0,10],[0,10],[0,10]]),
+                                  energy=0.0, distance_matrix=distance_matrix)
+            fp.systems.append(system)
+            result = fp.compute_fingerprint(0)
+            fingerprints = result[-1]
+            py_values['fingerprint_r2'] = [fingerprints[0,0], fingerprints[0,1], fingerprints[0,2]]
+            return py_values
+
+        if __name__ == "__main__":
+            print("=" * 60)
+            print("C++ vs Python Radial Fingerprint Comparison")
+            print("=" * 60)
+            
+            cpp = run_cpp()
+            py = run_python()
+            
+            all_pass = True
+            for key in cpp:
+                print(f"\n{key}:")
+                for i, (c, p) in enumerate(zip(cpp[key], py[key])):
+                    diff = abs(c - p)
+                    match = np.isclose(c, p, rtol=1e-8, atol=1e-12)
+                    status = "✓" if match else "✗"
+                    print(f"  [{i}] C++={c:.10f}  Python={p:.10f}  diff={diff:.2e}  {status}")
+                    if not match:
+                        all_pass = False
+            
+            print("\n" + "=" * 60)
+            if all_pass:
+                print("✅ SUCCESS: Python matches C++ reference!")
+                sys.exit(0)
+            else:
+                print("❌ FAILURE: Mismatch detected!")
+                sys.exit(1)
+        EOF
+    
+    - name: Run comparison test
+      run: python test_compare.py
+    
+    - name: Cleanup
+      if: always()
+      run: rm -f test_cpp_radial test_cpp_radial.cpp test_compare.py

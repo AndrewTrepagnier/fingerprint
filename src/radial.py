@@ -11,7 +11,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Dict
 import numpy as np
-import pandas as pd
+# import pandas as pd  # Uncomment if needed for future use
 import os
 
 @dataclass
@@ -236,22 +236,22 @@ class Fingerprint_radial:
         buffer = 5
         res = 1000
     
-        radii_table = np.zeros((res + buffer, int(self.params.n - self.params.o)), dtype=float)  # (1005, n-o)
+        radii_table = np.zeros((res + buffer, int(self.params.n - self.params.o) + 1), dtype=float)  # (1005, n-o+1) inclusive
         dfctable = np.zeros(res + buffer)
         r1 = np.zeros(res + buffer)
     
-        for m in range(int(self.params.n - self.params.o)):
+        for m in range(int(self.params.n - self.params.o) + 1):  # +1 because range is inclusive on both ends
             """
             Consider m=0 first, compute PI fingerprints for all m=0 and save in the 0th column of radii_table,
             then increment and fill in next column until all m's are computed and stored
             """
             for k in range(res + buffer):
-                r1[k] = self.params.rc * k / res
+                r1[k] = self.params.rc * self.params.rc * k / res  # r1 stores r² (squared radius)
                 r1_sqrt = np.sqrt(r1[k])
         
                 term_of_mth_fp = (
-                    (r1_sqrt / self.params.re) ** m *
-                    np.exp(-self.params.alphak[m] * (r1_sqrt / self.params.re)) *
+                    (r1_sqrt / self.params.re) ** (m + int(self.params.o)) *  # power is (m + omin)
+                    np.exp(-self.params.alpha[m] * (r1_sqrt / self.params.re)) *
                     self.cutoff_function(r1_sqrt)
                 )
                 radii_table[k, m] = term_of_mth_fp
@@ -260,7 +260,7 @@ class Fingerprint_radial:
                     dfctable[k] = 0
                 else:
                     term = (self.params.rc - r1_sqrt) / self.params.dr
-                    dfctable[k] = (-8 * (1 - term) ** 3) / (self.params.dr * (1 - term) ** 4)
+                    dfctable[k] = (-8 * (1 - term) ** 3) / (self.params.dr * (1 - (1 - term) ** 4))
     
         return r1, radii_table, dfctable
 
@@ -281,17 +281,22 @@ class Fingerprint_radial:
         r1, radii_table, dfctable = self.radii_table()
         
         # Initialize fingerprint array
-        num_fingerprints = int(self.params.n - self.params.o)
+        num_fingerprints = int(self.params.n - self.params.o) + 1  # +1 because range is inclusive
         fingerprints = np.zeros((system.num_atoms, num_fingerprints), dtype=float)
         
         for i in range(system.num_atoms):
             for j in range(system.num_atoms):
                 if i != j:  
-                    rij = system.distance_matrix[i,j]         
-                    idx = np.searchsorted(r1, rij) - 1 
+                    rij = system.distance_matrix[i,j]
+                    rsq = rij * rij  # squared distance for table lookup (r1 stores r²)
+                    
+                    if rsq > self.params.rc * self.params.rc:  # skip if beyond cutoff
+                        continue
+                        
+                    idx = np.searchsorted(r1, rsq) - 1 
                     
                     if idx > 0 and idx < len(r1) - 2: # Ensure we have points for interpolation
-                        t = (rij - r1[idx]) / (r1[idx+1] - r1[idx]) # Calculate interpolation parameter t
+                        t = (rsq - r1[idx]) / (r1[idx+1] - r1[idx]) # Calculate interpolation parameter t
                         
                         for m in range(num_fingerprints):
                             y = [

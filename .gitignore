@@ -1,1 +1,18 @@
 README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+
+# C++ build artifacts
+*.o
+*.out
+test_cpp_radial
+
+# IDE
+.vscode/
+.idea/
+*.swp
